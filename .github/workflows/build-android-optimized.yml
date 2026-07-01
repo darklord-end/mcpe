@@ -1,4 +1,4 @@
-name: Android Build (Optimized)
+name: Android Build (Windows, Optimized)
 
 on:
   workflow_dispatch:
@@ -8,13 +8,13 @@ on:
     branches: [ main, master ]
 
 env:
-  ANDROID_HOME: ${{ github.workspace }}/android-sdk
+  ANDROID_HOME: C:\android-sdk
   NDK_VERSION: r14b
 
 jobs:
   build:
     name: Build APK
-    runs-on: ubuntu-latest   # Быстрее, чем Windows
+    runs-on: windows-latest   # Оригинальный скрипт рассчитан на Windows
 
     steps:
       - name: Checkout code
@@ -33,47 +33,43 @@ jobs:
         id: cache-ndk
         uses: actions/cache@v4
         with:
-          path: ${{ env.ANDROID_HOME }}/ndk/android-ndk-${{ env.NDK_VERSION }}
+          path: C:\android-ndk-${{ env.NDK_VERSION }}
           key: ${{ runner.os }}-ndk-${{ env.NDK_VERSION }}
 
       - name: Download and extract NDK (if not cached)
         if: steps.cache-ndk.outputs.cache-hit != 'true'
         run: |
-          mkdir -p $ANDROID_HOME/ndk
-          wget -q https://dl.google.com/android/repository/android-ndk-$NDK_VERSION-linux-x86_64.zip -O ndk.zip
-          unzip -q ndk.zip -d $ANDROID_HOME/ndk
-          rm ndk.zip
+          curl -L -o ndk.zip https://dl.google.com/android/repository/android-ndk-$env:NDK_VERSION-windows-x86_64.zip
+          mkdir C:\android-ndk-$env:NDK_VERSION
+          7z x ndk.zip -oC:\
+          del ndk.zip
+        shell: pwsh
 
       - name: Set NDK environment
         run: |
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/android-ndk-$NDK_VERSION" >> $GITHUB_ENV
-          echo "$ANDROID_HOME/ndk/android-ndk-$NDK_VERSION" >> $GITHUB_PATH
+          echo "ANDROID_NDK_HOME=C:\android-ndk-$env:NDK_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
+          echo "C:\android-ndk-$env:NDK_VERSION" | Out-File -FilePath $env:GITHUB_PATH -Append
+        shell: pwsh
 
-      # ---------- Кеш Gradle (если есть) ----------
+      # ---------- Кеш Gradle (если используется) ----------
       - name: Cache Gradle
         uses: actions/cache@v4
         with:
           path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
+            ~\.gradle\caches
+            ~\.gradle\wrapper
           key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
           restore-keys: |
             ${{ runner.os }}-gradle-
 
       # ---------- Сборка ----------
-      # Если в проекте есть gradlew – используем его (быстрее и надёжнее)
-      - name: Build with Gradle
-        if: hashFiles('gradlew') != ''
-        run: |
-          chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon --build-cache --parallel
-
-      # Если нет gradlew – запускаем build.ps1 через PowerShell Core
       - name: Build with PowerShell script
-        if: hashFiles('gradlew') == ''
         shell: pwsh
         run: |
           .\build.ps1
+        env:
+          ANDROID_HOME: C:\android-sdk
+          ANDROID_NDK_HOME: C:\android-ndk-${{ env.NDK_VERSION }}
 
       # ---------- Загрузка артефакта ----------
       - name: Upload APK
