@@ -1,4 +1,4 @@
-name: Android Build (Fixed & Optimized)
+name: Android Build (Final Fix & Optimized)
 
 on:
   workflow_dispatch:
@@ -51,7 +51,7 @@ jobs:
           echo "C:\android-ndk-$env:NDK_VERSION" | Out-File -FilePath $env:GITHUB_PATH -Append
         shell: pwsh
 
-      # ---------- Кеш Gradle (на всякий случай) ----------
+      # ---------- Кеш Gradle ----------
       - name: Cache Gradle
         uses: actions/cache@v4
         with:
@@ -63,7 +63,7 @@ jobs:
             ${{ runner.os }}-gradle-
 
       # ---------- ИСПРАВЛЕНИЕ: добавляем TextBox.cpp в Android.mk ----------
-      - name: Patch Android.mk to include missing TextBox.cpp
+      - name: Patch Android.mk – add missing TextBox.cpp
         shell: pwsh
         run: |
           $mkPath = "android/jni/Android.mk"
@@ -71,23 +71,45 @@ jobs:
             Write-Host "Файл $mkPath не найден, пропускаем патч."
             exit 0
           }
+
+          Write-Host "=== Содержимое Android.mk ДО патча ==="
+          Get-Content $mkPath
+
+          # Проверяем, есть ли уже TextBox.cpp
           $content = Get-Content $mkPath -Raw
           if ($content -match "TextBox\.cpp") {
-            Write-Host "TextBox.cpp уже есть в Android.mk, пропускаем."
-            exit 0
-          }
-          # Находим строку LOCAL_SRC_FILES и добавляем TextBox.cpp после неё
-          $newLine = "LOCAL_SRC_FILES += ../../../src/client/gui/components/TextBox.cpp"
-          # Если строка LOCAL_SRC_FILES содержит знак =, добавляем в конец
-          if ($content -match "(LOCAL_SRC_FILES\s*[+:]?=\s*[^\r\n]*)(\r?\n)") {
-            $content = $content -replace "(${matches[1]})(\r?\n)", "`$1 $newLine`n"
+            Write-Host "TextBox.cpp уже присутствует в Android.mk."
           } else {
-            # Если не нашли, просто дописываем в конец файла
-            $content += "`n$newLine`n"
+            Write-Host "Добавляем TextBox.cpp в LOCAL_SRC_FILES..."
+
+            # Ищем строку, где начинается перечень LOCAL_SRC_FILES
+            # В типичном файле это выглядит как "LOCAL_SRC_FILES := ..." или "LOCAL_SRC_FILES += ..."
+            # Мы просто добавим новую строку в конец файла, но перед include или в конце секции.
+            # Лучше вставить после последнего упоминания LOCAL_SRC_FILES.
+            $lines = Get-Content $mkPath
+            $newLines = @()
+            $inserted = $false
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+              $line = $lines[$i]
+              $newLines += $line
+              # Если нашли строку, начинающуюся с LOCAL_SRC_FILES и она не закомментирована
+              if ($line -match "^\s*LOCAL_SRC_FILES\s*[+:]?=" -and -not $inserted) {
+                # Добавим наш файл в следующей строке (чтобы не нарушить синтаксис)
+                # Иногда список разбит на несколько строк с обратными слэшами, мы просто добавим новую строку с +=
+                $newLines += "LOCAL_SRC_FILES += ../../../src/client/gui/components/TextBox.cpp"
+                $inserted = $true
+              }
+            }
+            # Если не вставили (не нашли LOCAL_SRC_FILES), добавим в конец
+            if (-not $inserted) {
+              $newLines += ""
+              $newLines += "LOCAL_SRC_FILES += ../../../src/client/gui/components/TextBox.cpp"
+            }
+            Set-Content $mkPath -Value $newLines
+            Write-Host "Android.mk обновлён."
           }
-          Set-Content $mkPath $content -NoNewline
-          Write-Host "Android.mk обновлён: добавлен TextBox.cpp"
-          # Выведем содержимое для проверки
+
+          Write-Host "=== Содержимое Android.mk ПОСЛЕ патча ==="
           Get-Content $mkPath
 
       # ---------- Сборка ----------
