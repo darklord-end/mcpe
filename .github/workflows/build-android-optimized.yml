@@ -1,4 +1,4 @@
-name: Android Build (Windows, Optimized)
+name: Android Build (Fixed & Optimized)
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ env:
 jobs:
   build:
     name: Build APK
-    runs-on: windows-latest   # Оригинальный скрипт рассчитан на Windows
+    runs-on: windows-latest
 
     steps:
       - name: Checkout code
@@ -51,7 +51,7 @@ jobs:
           echo "C:\android-ndk-$env:NDK_VERSION" | Out-File -FilePath $env:GITHUB_PATH -Append
         shell: pwsh
 
-      # ---------- Кеш Gradle (если используется) ----------
+      # ---------- Кеш Gradle (на всякий случай) ----------
       - name: Cache Gradle
         uses: actions/cache@v4
         with:
@@ -61,6 +61,34 @@ jobs:
           key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
           restore-keys: |
             ${{ runner.os }}-gradle-
+
+      # ---------- ИСПРАВЛЕНИЕ: добавляем TextBox.cpp в Android.mk ----------
+      - name: Patch Android.mk to include missing TextBox.cpp
+        shell: pwsh
+        run: |
+          $mkPath = "android/jni/Android.mk"
+          if (-not (Test-Path $mkPath)) {
+            Write-Host "Файл $mkPath не найден, пропускаем патч."
+            exit 0
+          }
+          $content = Get-Content $mkPath -Raw
+          if ($content -match "TextBox\.cpp") {
+            Write-Host "TextBox.cpp уже есть в Android.mk, пропускаем."
+            exit 0
+          }
+          # Находим строку LOCAL_SRC_FILES и добавляем TextBox.cpp после неё
+          $newLine = "LOCAL_SRC_FILES += ../../../src/client/gui/components/TextBox.cpp"
+          # Если строка LOCAL_SRC_FILES содержит знак =, добавляем в конец
+          if ($content -match "(LOCAL_SRC_FILES\s*[+:]?=\s*[^\r\n]*)(\r?\n)") {
+            $content = $content -replace "(${matches[1]})(\r?\n)", "`$1 $newLine`n"
+          } else {
+            # Если не нашли, просто дописываем в конец файла
+            $content += "`n$newLine`n"
+          }
+          Set-Content $mkPath $content -NoNewline
+          Write-Host "Android.mk обновлён: добавлен TextBox.cpp"
+          # Выведем содержимое для проверки
+          Get-Content $mkPath
 
       # ---------- Сборка ----------
       - name: Build with PowerShell script
