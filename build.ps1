@@ -1,13 +1,14 @@
 # ============================================================
-#  MCPE 0.4.0 Android Build Script  —  from-scratch capable
-#  Works on a clean machine; creates all dirs, keystore and
-#  stub Java files automatically.
+#  MCPE 0.4.0 Android Build Script  —  improved
+#  - auto‑detects NDK / SDK
+#  - patches Android.mk if TextBox.cpp is missing
+#  - builds C++, Java, packages APK (optionally installs)
 #
 #  Usage:
-#    .\build.ps1          # full build (NDK + Java + APK + install)
-#    .\build.ps1 -NoCpp   # skip NDK rebuild (Java/assets changed)
-#    .\build.ps1 -NoJava  # skip Java recompile (C++ changed only)
-#    .\build.ps1 -NoBuild # repackage + install only (no recompile)
+#    .\build.ps1           # full build
+#    .\build.ps1 -NoCpp    # skip NDK rebuild
+#    .\build.ps1 -NoJava   # skip Java recompile
+#    .\build.ps1 -NoBuild  # repackage + install only
 # ============================================================
 param(
     [switch]$NoCpp,
@@ -18,17 +19,57 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-# ── Paths ────────────────────────────────────────────────────
-$repo       = $PSScriptRoot
-$apkbuild   = "C:\apkbuild"
-$ndk        = "C:\android-ndk-r14b"
-$sdkTools   = "$env:LOCALAPPDATA\Android\Sdk\build-tools\35.0.0"
-$androidJar = "$env:LOCALAPPDATA\Android\Sdk\platforms\android-36\android.jar"
-$adb        = "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe"
-$keystore   = "$apkbuild\debug.keystore"
-$pkg        = "com.mojang.minecraftpe"
+# ── Path detection ───────────────────────────────────────────
+function Get-ToolPath([string]$tool, [string]$fallbackPath) {
+    if (Test-Path $fallbackPath) { return $fallbackPath }
+    $found = Get-Command $tool -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source
+    if ($found) { return $found }
+    # try common locations
+    $common = @(
+        "C:\android-ndk-r14b\ndk-build.cmd",
+        "C:\android-ndk-r14b\ndk-build"
+    )
+    foreach ($c in $common) { if (Test-Path $c) { return $c } }
+    throw "$tool not found. Please set $($tool.ToUpper())_HOME environment variable."
+}
 
-# Auto-detect keytool from JAVA_HOME, then from common install locations
+function Get-SdkTool([string]$tool) {
+    $sdkRoot = $env:ANDROID_HOME
+    if (-not $sdkRoot) { $sdkRoot = "$env:LOCALAPPDATA\Android\Sdk" }
+    $buildTools = Get-ChildItem "$sdkRoot\build-tools" -ErrorAction SilentlyContinue |
+                  Sort-Object -Descending | Select-Object -First 1
+    if (-not $buildTools) { throw "No build-tools found in $sdkRoot\build-tools" }
+    $toolPath = Join-Path $buildTools.FullName "$tool.exe"
+    if (-not (Test-Path $toolPath)) { $toolPath = Join-Path $buildTools.FullName "$tool.bat" }
+    if (Test-Path $toolPath) { return $toolPath }
+    throw "$tool not found in $buildTools"
+}
+
+# ── Set up paths ─────────────────────────────────────────────
+$repoRoot = $PSScriptRoot
+$buildDir = "$repoRoot\build"
+$apkbuild = "$buildDir\apk"
+$ndkBuild = if ($env:ANDROID_NDK_HOME) { "$env:ANDROID_NDK_HOME\ndk-build.cmd" } else { "C:\android-ndk-r14b\ndk-build.cmd" }
+if (-not (Test-Path $ndkBuild)) { $ndkBuild = Get-ToolPath "ndk-build" $ndkBuild }
+
+$sdkRoot = $env:ANDROID_HOME
+if (-not $sdkRoot) { $sdkRoot = "$env:LOCALAPPDATA\Android\Sdk" }
+if (-not (Test-Path $sdkRoot)) { throw "Android SDK not found. Set ANDROID_HOME." }
+$androidJar = "$sdkRoot\platforms\android-36\android.jar"
+if (-not (Test-Path $androidJar)) {
+    # try latest platform
+    $platforms = Get-ChildItem "$sdkRoot\platforms" -ErrorAction SilentlyContinue | Sort-Object -Descending
+    if ($platforms) { $androidJar = Join-Path $platforms[0].FullName "android.jar" }
+    if (-not (Test-Path $androidJar)) { throw "android.jar not found. Install platform 36 or newer." }
+}
+
+$aapt = Get-SdkTool "aapt"
+$zipalign = Get-SdkTool "zipalign"
+$apksigner = Get-SdkTool "apksigner"
+$d8 = Get-SdkTool "d8"
+$adb = if (Test-Path "$sdkRoot\platform-tools\adb.exe") { "$sdkRoot\platform-tools\adb.exe" } else { $null }
+
+# keytool
 $keytool = if ($env:JAVA_HOME) { "$env:JAVA_HOME\bin\keytool.exe" } else {
     $found = Get-ChildItem "C:\Program Files\Java","C:\Program Files\Eclipse Adoptium" `
         -Filter keytool.exe -Recurse -ErrorAction SilentlyContinue |
@@ -37,21 +78,25 @@ $keytool = if ($env:JAVA_HOME) { "$env:JAVA_HOME\bin\keytool.exe" } else {
     $found
 }
 
-$jniDir     = "$repo\project\android\jni"
-$libSrc     = "$repo\project\android\libs\arm64-v8a\libminecraftpe.so"
+# ── Project paths ─────────────────────────────────────────────
+$jniDir     = "$repoRoot\project\android\jni"
+$libSrc     = "$repoRoot\project\android\libs\arm64-v8a\libminecraftpe.so"
 $libDst     = "$apkbuild\lib\arm64-v8a\libminecraftpe.so"
-$manifest   = "$repo\project\android_java\AndroidManifest.xml"
-$res        = "$repo\project\android_java\res"
-$javaSrc    = "$repo\project\android_java\src"
+$manifest   = "$repoRoot\project\android_java\AndroidManifest.xml"
+$res        = "$repoRoot\project\android_java\res"
+$javaSrc    = "$repoRoot\project\android_java\src"
 $stubsDir   = "$apkbuild\stubs"
 $rJava      = "$apkbuild\gen\R.java"
 $classesDir = "$apkbuild\classes"
 $dexOut     = "$apkbuild\classes.dex"
-$dataDir    = "$repo\data"
+$dataDir    = "$repoRoot\data"
+$keystore   = "$apkbuild\debug.keystore"
 
 $unsigned   = "$apkbuild\minecraftpe-unsigned.apk"
 $aligned    = "$apkbuild\minecraftpe-aligned.apk"
 $signed     = "$apkbuild\minecraftpe-debug.apk"
+
+$pkg        = "com.mojang.minecraftpe"
 
 Add-Type -Assembly "System.IO.Compression.FileSystem"
 
@@ -68,7 +113,6 @@ function Write-Stub([string]$rel, [string]$content) {
 
 # ── 0. Bootstrap ─────────────────────────────────────────────
 Write-Step "Bootstrap"
-
 New-Dir $apkbuild
 New-Dir "$apkbuild\lib\arm64-v8a"
 New-Dir "$apkbuild\gen"
@@ -76,20 +120,17 @@ New-Dir $stubsDir
 
 if (-not (Test-Path $keystore)) {
     Write-Host "  generating debug.keystore..."
-    $eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     & $keytool -genkeypair `
         -keystore $keystore -storepass android -keypass android `
         -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 `
         -dname "CN=Android Debug,O=Android,C=US" 2>&1 | Out-Null
-    $ErrorActionPreference = $eap
     Assert-ExitCode "keytool"
     Write-Host "  keystore created"
 } else { Write-Host "  keystore OK" }
 
+# Stub files (as before)...
 Write-Stub "com\mojang\android\StringValue.java" "package com.mojang.android;`npublic interface StringValue { String getStringValue(); }`n"
-
 Write-Stub "com\mojang\android\licensing\LicenseCodes.java" "package com.mojang.android.licensing;`npublic class LicenseCodes { public static final int LICENSE_OK = 0; }`n"
-
 Write-Stub "com\mojang\android\EditTextAscii.java" @"
 package com.mojang.android;
 import android.content.Context;
@@ -114,7 +155,6 @@ public class EditTextAscii extends EditText implements TextWatcher {
     }
 }
 "@
-
 Write-Stub "com\mojang\android\preferences\SliderPreference.java" @"
 package com.mojang.android.preferences;
 import android.content.Context;
@@ -159,7 +199,6 @@ public class SliderPreference extends DialogPreference implements SeekBar.OnSeek
     private String gStr(AttributeSet a,String ns,String n,String d){int id=a.getAttributeResourceValue(ns,n,0);if(id!=0)return getContext().getResources().getString(id);String v=a.getAttributeValue(ns,n);return v!=null?v:d;}
 }
 "@
-
 Write-Stub "com\mojang\minecraftpe\MainMenuOptionsActivity.java" @"
 package com.mojang.minecraftpe;
 import android.app.Activity;
@@ -169,7 +208,6 @@ public class MainMenuOptionsActivity extends Activity {
     public static final String Controls_Sensitivity="controls_sensitivity";
 }
 "@
-
 Write-Stub "com\mojang\minecraftpe\Minecraft_Market.java" @"
 package com.mojang.minecraftpe;
 import android.app.Activity; import android.content.Intent; import android.os.Bundle;
@@ -177,7 +215,6 @@ public class Minecraft_Market extends Activity {
     @Override protected void onCreate(Bundle s){super.onCreate(s);startActivity(new Intent(this,MainActivity.class));finish();}
 }
 "@
-
 Write-Stub "com\mojang\minecraftpe\Minecraft_Market_Demo.java" @"
 package com.mojang.minecraftpe;
 import android.content.Intent; import android.net.Uri;
@@ -186,7 +223,6 @@ public class Minecraft_Market_Demo extends MainActivity {
     @Override protected boolean isDemo(){return true;}
 }
 "@
-
 Write-Stub "com\mojang\minecraftpe\GameModeButton.java" @"
 package com.mojang.minecraftpe;
 import com.mojang.android.StringValue;
@@ -215,37 +251,62 @@ public class GameModeButton extends ToggleButton implements OnClickListener,Stri
 
 Write-Host "  stubs OK"
 
-# ── 1. NDK build ─────────────────────────────────────────────
+# ── 1. Patch Android.mk (if missing TextBox.cpp) ────────────
+$mkPath = "$jniDir\Android.mk"
+if (Test-Path $mkPath) {
+    $content = Get-Content $mkPath -Raw
+    if ($content -notmatch "TextBox\.cpp") {
+        Write-Host "  patching Android.mk to add TextBox.cpp..."
+        $lines = Get-Content $mkPath
+        $newLines = @()
+        $inserted = $false
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            $newLines += $lines[$i]
+            if ($lines[$i] -match "^\s*LOCAL_SRC_FILES\s*[+:]?=" -and -not $inserted) {
+                $newLines += "LOCAL_SRC_FILES += ../../../src/client/gui/components/TextBox.cpp"
+                $inserted = $true
+            }
+        }
+        if (-not $inserted) {
+            $newLines += ""
+            $newLines += "LOCAL_SRC_FILES += ../../../src/client/gui/components/TextBox.cpp"
+        }
+        Set-Content $mkPath -Value $newLines
+        Write-Host "  Android.mk patched."
+    } else {
+        Write-Host "  TextBox.cpp already in Android.mk"
+    }
+} else {
+    Write-Host "  Warning: Android.mk not found, skipping patch."
+}
+
+# ── 2. NDK build ─────────────────────────────────────────────
 if (-not $NoCpp -and -not $NoBuild) {
     Write-Step "NDK build (arm64-v8a)"
-    # NDK r14b on Windows hits the 32K CreateProcess limit with long paths.
-    # Work around it by building through a short junction C:\m -> repo root.
-    $junctionBase = "C:\m"
-    if (-not (Test-Path $junctionBase)) {
-        & cmd.exe /c "mklink /J `"$junctionBase`" `"$repo`"" | Out-Null
-    }
-    Push-Location "$junctionBase\project\android\jni"
-    $env:NDK_MODULE_PATH = "$junctionBase\project\lib_projects"
-    # run ndk-build and capture everything; let user see full output for debugging
-    $ndkOutput = & "$ndk\ndk-build.cmd" NDK_PROJECT_PATH="$junctionBase\project\android" APP_BUILD_SCRIPT="$junctionBase\project\android\jni\Android.mk" 2>&1 | Tee-Object -Variable ndkOutput
-    # dump entire output for diagnosis
+    Push-Location $jniDir
+    # Use short path to avoid 32K command line limit – set NDK_PROJECT_PATH to parent
+    $projectDir = Resolve-Path "$jniDir\.."  # project\android
+    $ndkCmd = "$ndkBuild NDK_PROJECT_PATH=`"$projectDir`" APP_BUILD_SCRIPT=`"$jniDir\Android.mk`""
+    Write-Host "  Running: $ndkCmd"
+    $ndkOutput = Invoke-Expression "& $ndkCmd 2>&1" | Tee-Object -Variable ndkOutput
     Write-Host "---- NDK BUILD OUTPUT BEGIN ----"
     $ndkOutput | ForEach-Object { Write-Host $_ }
     Write-Host "---- NDK BUILD OUTPUT END ----"
-    # optionally highlight errors/warnings afterwards
-    $ndkOutput | Where-Object { $_ -match "error:|warning:|libminecraftpe|In file included" }
     Pop-Location
     Assert-ExitCode "ndk-build"
-    Copy-Item $libSrc $libDst -Force
-    Write-Host "  .so  ->  $libDst"
+    if (Test-Path $libSrc) {
+        Copy-Item $libSrc $libDst -Force
+        Write-Host "  .so  ->  $libDst"
+    } else {
+        throw "libminecraftpe.so not built. Check NDK output."
+    }
 }
 
-# ── 2. Java compile ──────────────────────────────────────────
+# ── 3. Java compile ──────────────────────────────────────────
 if (-not $NoJava -and -not $NoBuild) {
     Write-Step "Java compile"
-
     New-Dir (Split-Path $rJava -Parent)
-    & "$sdkTools\aapt.exe" package -f -M $manifest -S $res -I $androidJar -J "$apkbuild\gen" -F "$apkbuild\_rgen.apk" 2>&1 | Out-Null
+    & $aapt package -f -M $manifest -S $res -I $androidJar -J "$apkbuild\gen" -F "$apkbuild\_rgen.apk" 2>&1 | Out-Null
     Assert-ExitCode "aapt R.java"
     Remove-Item "$apkbuild\_rgen.apk" -ea SilentlyContinue
 
@@ -254,49 +315,55 @@ if (-not $NoJava -and -not $NoBuild) {
         Get-ChildItem $stubsDir -Recurse -Filter "*.java" | Select-Object -Exp FullName
         $rJava
     )
-
     Remove-Item $classesDir -Recurse -Force -ea SilentlyContinue
     New-Dir $classesDir
-    $eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    $errors = & javac --release 8 -cp $androidJar -d $classesDir @srcs 2>&1 |
-              Where-Object { $_ -match "error:" }
-    $ErrorActionPreference = $eap
-    if ($errors) { Write-Host $errors -ForegroundColor Red; exit 1 }
+    $javacOut = & javac --release 8 -cp $androidJar -d $classesDir @srcs 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "javac errors:" -ForegroundColor Red
+        $javacOut | Where-Object { $_ -match "error:" } | ForEach-Object { Write-Host $_ -ForegroundColor Red }
+        exit 1
+    }
     Write-Host "  javac OK"
 
     $classFiles = Get-ChildItem $classesDir -Recurse -Filter "*.class" | Select-Object -Exp FullName
-    & "$sdkTools\d8.bat" --min-api 21 --output $apkbuild $classFiles
+    & $d8 --min-api 21 --output $apkbuild $classFiles
     Assert-ExitCode "d8"
     Write-Host "  d8  ->  $dexOut"
 }
 
-# ── 3. Package APK ───────────────────────────────────────────
-Write-Step "Package APK"
-Remove-Item $unsigned,$aligned,$signed -ea SilentlyContinue
+# ── 4. Package APK ───────────────────────────────────────────
+if (-not $NoBuild) {
+    Write-Step "Package APK"
+    Remove-Item $unsigned,$aligned,$signed -ea SilentlyContinue
 
-& "$sdkTools\aapt.exe" package -f -M $manifest -S $res -I $androidJar -F $unsigned
-Assert-ExitCode "aapt package"
+    & $aapt package -f -M $manifest -S $res -I $androidJar -F $unsigned
+    Assert-ExitCode "aapt package"
 
-$zip = [System.IO.Compression.ZipFile]::Open($unsigned, 'Update')
-try {
-    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip,$dexOut,"classes.dex",[System.IO.Compression.CompressionLevel]::Fastest)|Out-Null
-    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip,$libDst,"lib/arm64-v8a/libminecraftpe.so",[System.IO.Compression.CompressionLevel]::NoCompression)|Out-Null
-    Get-ChildItem $dataDir -Recurse -File | ForEach-Object {
-        $rel=$_.FullName.Substring("$dataDir\".Length).Replace('\','/')
-        [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip,$_.FullName,"assets/$rel",[System.IO.Compression.CompressionLevel]::NoCompression)|Out-Null
-    }
-} finally { $zip.Dispose() }
-Write-Host "  APK assembled"
+    $zip = [System.IO.Compression.ZipFile]::Open($unsigned, 'Update')
+    try {
+        [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip,$dexOut,"classes.dex",[System.IO.Compression.CompressionLevel]::Fastest) | Out-Null
+        [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip,$libDst,"lib/arm64-v8a/libminecraftpe.so",[System.IO.Compression.CompressionLevel]::NoCompression) | Out-Null
+        Get-ChildItem $dataDir -Recurse -File | ForEach-Object {
+            $rel = $_.FullName.Substring("$dataDir\".Length).Replace('\','/')
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip,$_.FullName,"assets/$rel",[System.IO.Compression.CompressionLevel]::NoCompression) | Out-Null
+        }
+    } finally { $zip.Dispose() }
+    Write-Host "  APK assembled"
 
-& "$sdkTools\zipalign.exe" -p 4 $unsigned $aligned; Assert-ExitCode "zipalign"
-& "$sdkTools\apksigner.bat" sign --ks $keystore --ks-pass pass:android --key-pass pass:android --out $signed $aligned; Assert-ExitCode "apksigner"
-Write-Host "  signed  ->  $signed"
+    & $zipalign -p 4 $unsigned $aligned; Assert-ExitCode "zipalign"
+    & $apksigner sign --ks $keystore --ks-pass pass:android --key-pass pass:android --out $signed $aligned
+    Assert-ExitCode "apksigner"
+    Write-Host "  signed  ->  $signed"
+}
 
-# ── 4. Install ───────────────────────────────────────────────
-Write-Step "Install"
-& $adb shell am force-stop $pkg
-& $adb uninstall $pkg 2>$null
-& $adb install --no-incremental $signed
-Assert-ExitCode "adb install"
+# ── 5. Install (if adb available) ───────────────────────────
+if ($adb -and (Test-Path $adb) -and -not $NoBuild) {
+    Write-Step "Install"
+    & $adb shell am force-stop $pkg 2>$null
+    & $adb uninstall $pkg 2>$null
+    & $adb install --no-incremental $signed
+    if ($LASTEXITCODE -eq 0) { Write-Host "  Installed successfully." }
+    else { Write-Host "  Install failed (device may not be connected)." -ForegroundColor Yellow }
+}
 
 Write-Host "`nDone." -ForegroundColor Green
