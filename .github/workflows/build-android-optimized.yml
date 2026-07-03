@@ -1,4 +1,4 @@
-name: Android Build (Final Fix & Optimized)
+name: Android Build (Stable & Optimized)
 
 on:
   workflow_dispatch:
@@ -28,7 +28,21 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      # ---------- Кеш NDK ----------
+      # ---------- 1. Установка Android SDK ----------
+      - name: Install Android SDK Command-line Tools
+        run: |
+          mkdir C:\android-sdk
+          cd C:\android-sdk
+          curl -L -o sdk-tools.zip https://dl.google.com/android/repository/commandlinetools-win-11076708_latest.zip
+          7z x sdk-tools.zip -oC:\android-sdk
+          del sdk-tools.zip
+          # Принимаем лицензии
+          echo y | C:\android-sdk\cmdline-tools\bin\sdkmanager.bat --licenses
+          # Устанавливаем необходимые платформы и инструменты (если нужно)
+          C:\android-sdk\cmdline-tools\bin\sdkmanager.bat "platform-tools" "platforms;android-29"
+        shell: pwsh
+
+      # ---------- 2. Кеш NDK ----------
       - name: Cache Android NDK
         id: cache-ndk
         uses: actions/cache@v4
@@ -51,7 +65,7 @@ jobs:
           echo "C:\android-ndk-$env:NDK_VERSION" | Out-File -FilePath $env:GITHUB_PATH -Append
         shell: pwsh
 
-      # ---------- Кеш Gradle ----------
+      # ---------- 3. Кеш Gradle ----------
       - name: Cache Gradle
         uses: actions/cache@v4
         with:
@@ -62,7 +76,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      # ---------- ИСПРАВЛЕНИЕ: добавляем TextBox.cpp в Android.mk ----------
+      # ---------- 4. Исправление Android.mk (перманентное) ----------
+      # В идеале, этот шаг нужно заменить на прямое исправление файла в репозитории.
+      # Но пока он здесь, он делает сборку более стабильной.
       - name: Patch Android.mk – add missing TextBox.cpp
         shell: pwsh
         run: |
@@ -71,36 +87,25 @@ jobs:
             Write-Host "Файл $mkPath не найден, пропускаем патч."
             exit 0
           }
-
           Write-Host "=== Содержимое Android.mk ДО патча ==="
           Get-Content $mkPath
 
-          # Проверяем, есть ли уже TextBox.cpp
           $content = Get-Content $mkPath -Raw
           if ($content -match "TextBox\.cpp") {
             Write-Host "TextBox.cpp уже присутствует в Android.mk."
           } else {
             Write-Host "Добавляем TextBox.cpp в LOCAL_SRC_FILES..."
-
-            # Ищем строку, где начинается перечень LOCAL_SRC_FILES
-            # В типичном файле это выглядит как "LOCAL_SRC_FILES := ..." или "LOCAL_SRC_FILES += ..."
-            # Мы просто добавим новую строку в конец файла, но перед include или в конце секции.
-            # Лучше вставить после последнего упоминания LOCAL_SRC_FILES.
             $lines = Get-Content $mkPath
             $newLines = @()
             $inserted = $false
             for ($i = 0; $i -lt $lines.Count; $i++) {
               $line = $lines[$i]
               $newLines += $line
-              # Если нашли строку, начинающуюся с LOCAL_SRC_FILES и она не закомментирована
               if ($line -match "^\s*LOCAL_SRC_FILES\s*[+:]?=" -and -not $inserted) {
-                # Добавим наш файл в следующей строке (чтобы не нарушить синтаксис)
-                # Иногда список разбит на несколько строк с обратными слэшами, мы просто добавим новую строку с +=
                 $newLines += "LOCAL_SRC_FILES += ../../../src/client/gui/components/TextBox.cpp"
                 $inserted = $true
               }
             }
-            # Если не вставили (не нашли LOCAL_SRC_FILES), добавим в конец
             if (-not $inserted) {
               $newLines += ""
               $newLines += "LOCAL_SRC_FILES += ../../../src/client/gui/components/TextBox.cpp"
@@ -112,16 +117,22 @@ jobs:
           Write-Host "=== Содержимое Android.mk ПОСЛЕ патча ==="
           Get-Content $mkPath
 
-      # ---------- Сборка ----------
+      # ---------- 5. Сборка ----------
       - name: Build with PowerShell script
         shell: pwsh
         run: |
+          # Проверяем наличие build.ps1
+          if (-not (Test-Path ".\build.ps1")) {
+            Write-Error "build.ps1 not found!"
+            exit 1
+          }
+          # Запускаем сборку. Важно, чтобы скрипт возвращал ошибку при провале.
           .\build.ps1
         env:
           ANDROID_HOME: C:\android-sdk
           ANDROID_NDK_HOME: C:\android-ndk-${{ env.NDK_VERSION }}
 
-      # ---------- Загрузка артефакта ----------
+      # ---------- 6. Загрузка артефакта ----------
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
