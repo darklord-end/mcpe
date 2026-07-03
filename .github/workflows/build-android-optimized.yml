@@ -1,7 +1,7 @@
-name: Android Build (Stable & Optimized)
+name: Ultimate MCPE Android Build
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:          # ручной запуск
   push:
     branches: [ main, master ]
   pull_request:
@@ -9,134 +9,123 @@ on:
 
 env:
   ANDROID_HOME: C:\android-sdk
-  NDK_VERSION: r14b
+  ANDROID_NDK_HOME: C:\android-ndk-r14b
+  GRADLE_USER_HOME: ~/.gradle
 
 jobs:
   build:
     name: Build APK
     runs-on: windows-latest
+    timeout-minutes: 60
 
     steps:
+      # 1. Checkout репозитория
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
 
+      # 2. Установка JDK (нужен для keytool и javac)
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
+          cache: 'gradle'
 
-      # ---------- 1. Установка Android SDK ----------
-      - name: Install Android SDK Command-line Tools
-        run: |
-          mkdir C:\android-sdk
-          cd C:\android-sdk
-          curl -L -o sdk-tools.zip https://dl.google.com/android/repository/commandlinetools-win-11076708_latest.zip
-          7z x sdk-tools.zip -oC:\android-sdk
-          del sdk-tools.zip
-          # Принимаем лицензии
-          echo y | C:\android-sdk\cmdline-tools\bin\sdkmanager.bat --licenses
-          # Устанавливаем необходимые платформы и инструменты (если нужно)
-          C:\android-sdk\cmdline-tools\bin\sdkmanager.bat "platform-tools" "platforms;android-29"
-        shell: pwsh
-
-      # ---------- 2. Кеш NDK ----------
-      - name: Cache Android NDK
+      # 3. Кеширование NDK (r14b) – экономит время
+      - name: Cache Android NDK r14b
         id: cache-ndk
         uses: actions/cache@v4
         with:
-          path: C:\android-ndk-${{ env.NDK_VERSION }}
-          key: ${{ runner.os }}-ndk-${{ env.NDK_VERSION }}
+          path: C:\android-ndk-r14b
+          key: ${{ runner.os }}-ndk-r14b-${{ hashFiles('**/Android.mk') }}
+          restore-keys: |
+            ${{ runner.os }}-ndk-r14b-
 
-      - name: Download and extract NDK (if not cached)
+      - name: Download NDK r14b (if not cached)
         if: steps.cache-ndk.outputs.cache-hit != 'true'
         run: |
-          curl -L -o ndk.zip https://dl.google.com/android/repository/android-ndk-$env:NDK_VERSION-windows-x86_64.zip
-          mkdir C:\android-ndk-$env:NDK_VERSION
+          curl -L -o ndk.zip https://dl.google.com/android/repository/android-ndk-r14b-windows-x86_64.zip
           7z x ndk.zip -oC:\
           del ndk.zip
-        shell: pwsh
 
-      - name: Set NDK environment
-        run: |
-          echo "ANDROID_NDK_HOME=C:\android-ndk-$env:NDK_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
-          echo "C:\android-ndk-$env:NDK_VERSION" | Out-File -FilePath $env:GITHUB_PATH -Append
-        shell: pwsh
-
-      # ---------- 3. Кеш Gradle ----------
-      - name: Cache Gradle
+      # 4. Кеширование Android SDK (build-tools, платформы)
+      - name: Cache Android SDK components
+        id: cache-sdk
         uses: actions/cache@v4
         with:
-          path: |
-            ~\.gradle\caches
-            ~\.gradle\wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          path: C:\android-sdk
+          key: ${{ runner.os }}-sdk-${{ hashFiles('**/AndroidManifest.xml') }}
           restore-keys: |
-            ${{ runner.os }}-gradle-
+            ${{ runner.os }}-sdk-
 
-      # ---------- 4. Исправление Android.mk (перманентное) ----------
-      # В идеале, этот шаг нужно заменить на прямое исправление файла в репозитории.
-      # Но пока он здесь, он делает сборку более стабильной.
-      - name: Patch Android.mk – add missing TextBox.cpp
+      - name: Install Android SDK (if not cached)
+        if: steps.cache-sdk.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
-          $mkPath = "android/jni/Android.mk"
-          if (-not (Test-Path $mkPath)) {
-            Write-Host "Файл $mkPath не найден, пропускаем патч."
-            exit 0
-          }
-          Write-Host "=== Содержимое Android.mk ДО патча ==="
-          Get-Content $mkPath
+          # Создаём структуру каталогов
+          New-Item -ItemType Directory -Force -Path "$env:ANDROID_HOME\cmdline-tools" | Out-Null
 
-          $content = Get-Content $mkPath -Raw
-          if ($content -match "TextBox\.cpp") {
-            Write-Host "TextBox.cpp уже присутствует в Android.mk."
-          } else {
-            Write-Host "Добавляем TextBox.cpp в LOCAL_SRC_FILES..."
-            $lines = Get-Content $mkPath
-            $newLines = @()
-            $inserted = $false
-            for ($i = 0; $i -lt $lines.Count; $i++) {
-              $line = $lines[$i]
-              $newLines += $line
-              if ($line -match "^\s*LOCAL_SRC_FILES\s*[+:]?=" -and -not $inserted) {
-                $newLines += "LOCAL_SRC_FILES += ../../../src/client/gui/components/TextBox.cpp"
-                $inserted = $true
-              }
-            }
-            if (-not $inserted) {
-              $newLines += ""
-              $newLines += "LOCAL_SRC_FILES += ../../../src/client/gui/components/TextBox.cpp"
-            }
-            Set-Content $mkPath -Value $newLines
-            Write-Host "Android.mk обновлён."
+          # Скачиваем последнюю версию commandlinetools
+          curl -L -o sdk-tools.zip https://dl.google.com/android/repository/commandlinetools-win-11076708_latest.zip
+          7z x sdk-tools.zip -o"$env:ANDROID_HOME\cmdline-tools\" | Out-Null
+
+          # Перемещаем в правильную структуру
+          if (Test-Path "$env:ANDROID_HOME\cmdline-tools\cmdline-tools") {
+              Move-Item "$env:ANDROID_HOME\cmdline-tools\cmdline-tools" "$env:ANDROID_HOME\cmdline-tools\latest" -Force
           }
 
-          Write-Host "=== Содержимое Android.mk ПОСЛЕ патча ==="
-          Get-Content $mkPath
+          $sdkManager = "$env:ANDROID_HOME\cmdline-tools\latest\bin\sdkmanager.bat"
+          if (-not (Test-Path $sdkManager)) {
+              Write-Error "sdkmanager.bat not found!"
+              exit 1
+          }
 
-      # ---------- 5. Сборка ----------
-      - name: Build with PowerShell script
+          # Принимаем лицензии (автоматически yes)
+          echo y | & $sdkManager --sdk_root="$env:ANDROID_HOME" --licenses 2>&1 | Out-Null
+
+          # Устанавливаем нужные компоненты
+          & $sdkManager --sdk_root="$env:ANDROID_HOME" "platform-tools" "platforms;android-29" "build-tools;35.0.0" 2>&1 | Out-Null
+
+          Write-Host "Android SDK installed successfully."
+
+      # 5. Проверка наличия build.ps1 (если отсутствует – создаём из шаблона)
+      - name: Ensure build.ps1 exists
         shell: pwsh
         run: |
-          # Проверяем наличие build.ps1
           if (-not (Test-Path ".\build.ps1")) {
-            Write-Error "build.ps1 not found!"
-            exit 1
+              Write-Host "build.ps1 not found, creating from template..."
+              # Можно встроить минимальную версию или скопировать из репозитория
+              # Но мы предполагаем, что файл уже есть.
+              # Для надёжности можно завершить с ошибкой.
+              Write-Error "build.ps1 is required!"
+              exit 1
           }
-          # Запускаем сборку. Важно, чтобы скрипт возвращал ошибку при провале.
-          .\build.ps1
-        env:
-          ANDROID_HOME: C:\android-sdk
-          ANDROID_NDK_HOME: C:\android-ndk-${{ env.NDK_VERSION }}
 
-      # ---------- 6. Загрузка артефакта ----------
+      # 6. Основная сборка (использует наш улучшенный build.ps1)
+      - name: Build APK
+        shell: pwsh
+        run: .\build.ps1
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+          JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}   # автоматически задаётся actions/setup-java
+
+      # 7. Загрузка артефакта (APK)
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: mcpe-android-apk
           path: |
-            **/*.apk
-            **/outputs/**/*.apk
+            build/apk/*.apk
+            project/android/bin/*.apk   # на всякий случай
+          if-no-files-found: error
+
+      # 8. (Опционально) Вывод информации о сборке
+      - name: Display build info
+        run: |
+          echo "Build completed at $(Get-Date)"
+          Get-ChildItem build/apk -Recurse | Select-Object Name, Length, LastWriteTime
+        shell: pwsh
