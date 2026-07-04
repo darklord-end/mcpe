@@ -10,6 +10,7 @@ cmake_install.cmake
 Makefile
 *.cmake
 !cmake/CPM.cmake
+!cmake/Toolchains.cmake
 
 # Compiled object files
 *.o
