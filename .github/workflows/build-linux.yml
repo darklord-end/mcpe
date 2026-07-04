@@ -1,0 +1,116 @@
+name: Minecraft Potet Edition - Linux Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build Type'
+        required: true
+        default: 'debug'
+        type: choice
+        options:
+          - debug
+          - release
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'src/**'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - '.github/workflows/build-linux.yml'
+  pull_request:
+    branches: [ main, master ]
+
+env:
+  BUILD_TYPE: ${{ github.event.inputs.build_type || 'debug' }}
+
+jobs:
+  build-linux:
+    name: Build Linux Binary
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            git \
+            ninja-build \
+            libgl1-mesa-dev \
+            libglu1-mesa-dev \
+            libx11-dev \
+            libxrandr-dev \
+            libxinerama-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libasound2-dev \
+            libpulse-dev \
+            libopenal-dev \
+            libglfw3-dev
+
+      - name: Remove Wayland dependencies to prevent GLFW from using them
+        run: |
+          # Remove Wayland packages that might cause GLFW to try building with Wayland support
+          sudo apt-get remove -y libwayland-dev libwayland-cursor-dev libwayland-egl-dev libxkbcommon-dev 2>/dev/null || true
+          sudo apt-get autoremove -y 2>/dev/null || true
+
+      - name: Cache CPM dependencies
+        id: cache-cpm
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/CPM
+            build/cpm
+          key: ${{ runner.os }}-cpm-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-cpm-
+
+      - name: Create build directory
+        run: mkdir -p build/linux
+
+      - name: Configure CMake
+        working-directory: build/linux
+        run: |
+          if [ "${{ env.BUILD_TYPE }}" = "release" ]; then
+              cmake -DCMAKE_BUILD_TYPE=Release -G Ninja -DUSE_WAYLAND=OFF ../..
+          else
+              cmake -DCMAKE_BUILD_TYPE=Debug -G Ninja -DUSE_WAYLAND=OFF ../..
+          fi
+
+      - name: Build with Ninja
+        working-directory: build/linux
+        run: ninja -j$(nproc) || ninja -j1
+
+      - name: Rename executable
+        run: |
+          if [ -f "build/linux/minecraftpe" ]; then
+              mv "build/linux/minecraftpe" "build/linux/MinecraftPotetEdition"
+          fi
+          if [ -f "build/linux/MinecraftPE" ]; then
+              mv "build/linux/MinecraftPE" "build/linux/MinecraftPotetEdition"
+          fi
+
+      - name: Upload Linux binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: minecraft-potet-edition-linux-${{ env.BUILD_TYPE }}
+          path: build/linux/MinecraftPotetEdition
+          if-no-files-found: ignore
+
+      - name: Display build info
+        run: |
+          echo "=== Minecraft Potet Edition Linux Build ==="
+          echo "Build Type: ${{ env.BUILD_TYPE }}"
+          echo "Completed at: $(date)"
+          echo ""
+          echo "Artifacts:"
+          ls -lh build/linux/MinecraftPotetEdition* 2>/dev/null || echo "No binary found"
